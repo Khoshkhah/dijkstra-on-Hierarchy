@@ -1,0 +1,29 @@
+# Build outputs
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Binaries
+shortcut_router
+*.o
+*.obj
+
+# Conda / virtual environments
+env/
+venv/
+.venv/
+env.env
+
+# Local configuration
+config/shortcut_router.cfg
+
+# Data or notebook checkpoints
+*.log
+*.tmp
+.ipynb_checkpoints/
+
+# Miniconda installer and temporary artifacts
+Miniconda3-*-Linux-x86_64.sh
+exit/
