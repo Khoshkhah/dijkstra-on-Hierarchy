@@ -91,6 +91,41 @@ public:
     QueryResult query(uint32_t source_edge, uint32_t target_edge) const;
     
     /**
+     * @brief Find shortest path from any source edge to any target edge.
+     * @param source_edges Vector of source edge IDs.
+     * @param target_edges Vector of target edge IDs.
+     * @param source_distances Distance from origin point to each source edge.
+     * @param target_distances Distance from each target edge to destination point.
+     * @return QueryResult with best path including approach distances.
+     * 
+     * This is more efficient than testing all combinations separately because
+     * it runs fewer Dijkstra searches and reuses computation.
+     */
+    QueryResult query_multi(
+        const std::vector<uint32_t>& source_edges,
+        const std::vector<uint32_t>& target_edges,
+        const std::vector<double>& source_distances,
+        const std::vector<double>& target_distances) const;
+    
+    /**
+     * @brief Optimized multi-source multi-target query using single bidirectional search.
+     * @param source_edges Vector of source edge IDs.
+     * @param target_edges Vector of target edge IDs.
+     * @param source_distances Distance from origin point to each source edge.
+     * @param target_distances Distance from each target edge to destination point.
+     * @return QueryResult with best path including approach distances.
+     * 
+     * This uses true multi-source multi-target Dijkstra with a single bidirectional
+     * search instead of N×M separate queries. Much faster for large candidate sets.
+     * Complexity: O(E log V) instead of O(N×M×E log V).
+     */
+    QueryResult query_multi_optimized(
+        const std::vector<uint32_t>& source_edges,
+        const std::vector<uint32_t>& target_edges,
+        const std::vector<double>& source_distances,
+        const std::vector<double>& target_distances) const;
+    
+    /**
      * @brief Expand a shortcut path into base edges using via_edge mapping.
      * @param shortcut_path Sequence of edge IDs from query result.
      * @return ExpandedResult with fully expanded base edge sequence.

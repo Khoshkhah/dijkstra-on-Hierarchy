@@ -46,13 +46,19 @@ struct Arguments {
     std::string edges_path;
     std::string config_path;
     std::vector<std::pair<uint32_t, uint32_t>> queries;
+    std::vector<uint32_t> source_edges;
+    std::vector<double> source_distances;
+    std::vector<uint32_t> target_edges;
+    std::vector<double> target_distances;
     std::size_t random_queries = 0;
     uint32_t seed = 42;
+    bool optimized = false;  // Use optimized multi-source multi-target algorithm
 };
 
 void print_usage(const char* program) {
     std::cerr << "Usage: " << program << " --shortcuts PATH [--edges PATH] [--source ID --target ID]"
-              << " [--random COUNT] [--seed SEED]\n";
+              << " [--sources ID1,ID2,... --source-dists D1,D2,... --targets ID1,ID2,... --target-dists D1,D2,...]"
+              << " [--optimized] [--random COUNT] [--seed SEED]\n";
 }
 
 std::string trim_copy(std::string_view value) {
@@ -136,10 +142,44 @@ Arguments parse_args(int argc, char** argv) {
             args.queries.emplace_back(source, target);
         } else if (token == "--target") {
             throw std::runtime_error("--target must be paired with --source preceding it");
+        } else if (token == "--sources" && i + 1 < argc) {
+            // Parse comma-separated list of source edge IDs
+            std::string sources_str = argv[++i];
+            std::stringstream ss(sources_str);
+            std::string item;
+            while (std::getline(ss, item, ',')) {
+                args.source_edges.push_back(std::stoul(item));
+            }
+        } else if (token == "--source-dists" && i + 1 < argc) {
+            // Parse comma-separated list of source distances
+            std::string dists_str = argv[++i];
+            std::stringstream ss(dists_str);
+            std::string item;
+            while (std::getline(ss, item, ',')) {
+                args.source_distances.push_back(std::stod(item));
+            }
+        } else if (token == "--targets" && i + 1 < argc) {
+            // Parse comma-separated list of target edge IDs
+            std::string targets_str = argv[++i];
+            std::stringstream ss(targets_str);
+            std::string item;
+            while (std::getline(ss, item, ',')) {
+                args.target_edges.push_back(std::stoul(item));
+            }
+        } else if (token == "--target-dists" && i + 1 < argc) {
+            // Parse comma-separated list of target distances
+            std::string dists_str = argv[++i];
+            std::stringstream ss(dists_str);
+            std::string item;
+            while (std::getline(ss, item, ',')) {
+                args.target_distances.push_back(std::stod(item));
+            }
         } else if (token == "--random" && i + 1 < argc) {
             args.random_queries = static_cast<std::size_t>(std::stoull(argv[++i]));
         } else if (token == "--seed" && i + 1 < argc) {
             args.seed = static_cast<uint32_t>(std::stoul(argv[++i]));
+        } else if (token == "--optimized") {
+            args.optimized = true;
         } else if (token == "--help") {
             print_usage(argv[0]);
             std::exit(0);
@@ -150,9 +190,25 @@ Arguments parse_args(int argc, char** argv) {
     if (args.shortcuts_path.empty()) {
         throw std::runtime_error("--shortcuts is required");
     }
-    if (args.queries.empty() && args.random_queries == 0) {
-        throw std::runtime_error("Provide --source/--target or --random");
+    
+    // Check if we have multi-source multi-target query
+    bool has_multi = !args.source_edges.empty() && !args.target_edges.empty();
+    bool has_single = !args.queries.empty();
+    bool has_random = args.random_queries > 0;
+    
+    if (!has_multi && !has_single && !has_random) {
+        throw std::runtime_error("Provide --source/--target, --sources/--targets, or --random");
     }
+    
+    if (has_multi) {
+        if (args.source_edges.size() != args.source_distances.size()) {
+            throw std::runtime_error("--sources and --source-dists must have same length");
+        }
+        if (args.target_edges.size() != args.target_distances.size()) {
+            throw std::runtime_error("--targets and --target-dists must have same length");
+        }
+    }
+    
     return args;
 }
 
@@ -219,6 +275,71 @@ int main(int argc, char** argv) {
         if (!args.edges_path.empty()) {
             std::cout << "Loading edge metadata from " << args.edges_path << "..." << std::endl;
             graph.load_edge_metadata(args.edges_path);
+        }
+
+        // Handle multi-source multi-target query
+        if (!args.source_edges.empty() && !args.target_edges.empty()) {
+            const auto start = std::chrono::high_resolution_clock::now();
+            QueryResult result;
+            
+            if (args.optimized) {
+                // Use optimized O(E log V) multi-source multi-target algorithm
+                result = graph.query_multi_optimized(
+                    args.source_edges, 
+                    args.target_edges,
+                    args.source_distances,
+                    args.target_distances
+                );
+            } else {
+                // Use batch processing O(N*M*E log V) algorithm
+                result = graph.query_multi(
+                    args.source_edges, 
+                    args.target_edges,
+                    args.source_distances,
+                    args.target_distances
+                );
+            }
+            
+            const auto end = std::chrono::high_resolution_clock::now();
+            const double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
+            
+            if (!result.reachable) {
+                std::cout << "No path found between source and target edge sets." << std::endl;
+                return 1;
+            }
+            
+            const ExpandedResult expanded = graph.expand_shortcut_path(result.path);
+            
+            std::cout << "Multi-source multi-target query";
+            if (args.optimized) {
+                std::cout << " (optimized)";
+            }
+            std::cout << ":\n";
+            std::cout << "  Distance (total including approach distances): " << result.distance << "\n";
+            std::cout << "  Shortcut path length: " << result.path.size() << " edges\n";
+            std::cout << "  Shortcut path: ";
+            for (size_t i = 0; i < result.path.size(); ++i) {
+                std::cout << result.path[i];
+                if (i + 1 < result.path.size()) {
+                    std::cout << " -> ";
+                }
+            }
+            std::cout << "\n";
+            
+            if (expanded.success && !expanded.base_edges.empty()) {
+                std::cout << "  Expanded base edge path length: " << expanded.base_edges.size() << " edges\n";
+                std::cout << "  Expanded path: ";
+                for (size_t i = 0; i < expanded.base_edges.size(); ++i) {
+                    std::cout << expanded.base_edges[i];
+                    if (i + 1 < expanded.base_edges.size()) {
+                        std::cout << " -> ";
+                    }
+                }
+                std::cout << "\n";
+            }
+            std::cout << "  Runtime: " << elapsed_ms << " ms\n";
+            
+            return 0;
         }
 
         if (args.random_queries > 0) {

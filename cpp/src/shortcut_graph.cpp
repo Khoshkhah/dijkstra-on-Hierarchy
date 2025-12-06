@@ -508,6 +508,248 @@ QueryResult ShortcutGraph::query(uint32_t source_edge, uint32_t target_edge) con
     return run_bidirectional(source_edge, target_edge, ctx);
 }
 
+QueryResult ShortcutGraph::query_multi(
+    const std::vector<uint32_t>& source_edges,
+    const std::vector<uint32_t>& target_edges,
+    const std::vector<double>& source_distances,
+    const std::vector<double>& target_distances) const {
+    
+    if (source_edges.empty() || target_edges.empty()) {
+        return {0.0, {}, false};
+    }
+    
+    if (source_edges.size() != source_distances.size() || 
+        target_edges.size() != target_distances.size()) {
+        return {0.0, {}, false};
+    }
+    
+    // Find best combination by testing all pairs
+    // This is still O(n*m) but allows for future optimization using
+    // multi-source/multi-target Dijkstra
+    double best_total_distance = std::numeric_limits<double>::infinity();
+    QueryResult best_result{0.0, {}, false};
+    
+    for (size_t i = 0; i < source_edges.size(); ++i) {
+        for (size_t j = 0; j < target_edges.size(); ++j) {
+            if (source_edges[i] == target_edges[j]) {
+                continue;  // Skip same edge
+            }
+            
+            QueryResult result = query(source_edges[i], target_edges[j]);
+            if (!result.reachable) {
+                continue;
+            }
+            
+            // Note: result.distance includes path + target_edge_length
+            // We need: source_dist + path + target_edge_length + target_dist
+            // So we add source_dist and target_dist to result.distance
+            double total_dist = source_distances[i] + result.distance + target_distances[j];
+            
+            if (total_dist < best_total_distance) {
+                best_total_distance = total_dist;
+                best_result = result;
+                best_result.distance = total_dist;  // Update to include approach distances
+            }
+        }
+    }
+    
+    return best_result;
+}
+
+QueryResult ShortcutGraph::query_multi_optimized(
+    const std::vector<uint32_t>& source_edges,
+    const std::vector<uint32_t>& target_edges,
+    const std::vector<double>& source_distances,
+    const std::vector<double>& target_distances) const {
+    
+    if (source_edges.empty() || target_edges.empty()) {
+        return {0.0, {}, false};
+    }
+    
+    if (source_edges.size() != source_distances.size() || 
+        target_edges.size() != target_distances.size()) {
+        return {0.0, {}, false};
+    }
+    
+    if (fwd_adj_.empty()) {
+        return {0.0, {}, false};
+    }
+    
+    const size_t edge_count = fwd_adj_.size();
+    const double inf = std::numeric_limits<double>::infinity();
+    
+    // Initialize distance and parent arrays
+    std::vector<double> dist_fwd(edge_count, inf);
+    std::vector<double> dist_bwd(edge_count, inf);
+    std::vector<int32_t> parent_fwd(edge_count, -1);
+    std::vector<int32_t> parent_bwd(edge_count, -1);
+    
+    // Priority queues for bidirectional search
+    struct Node {
+        double distance;
+        uint32_t edge;
+    };
+    auto cmp = [](const Node& lhs, const Node& rhs) { return lhs.distance > rhs.distance; };
+    std::priority_queue<Node, std::vector<Node>, decltype(cmp)> pq_fwd(cmp);
+    std::priority_queue<Node, std::vector<Node>, decltype(cmp)> pq_bwd(cmp);
+    
+    // Initialize all source edges
+    for (size_t i = 0; i < source_edges.size(); ++i) {
+        uint32_t edge = source_edges[i];
+        if (edge >= edge_count) continue;
+        
+        double dist = source_distances[i];
+        dist_fwd[edge] = dist;
+        parent_fwd[edge] = static_cast<int32_t>(edge);
+        pq_fwd.push({dist, edge});
+    }
+    
+    // Initialize all target edges
+    for (size_t j = 0; j < target_edges.size(); ++j) {
+        uint32_t edge = target_edges[j];
+        if (edge >= edge_count) continue;
+        
+        double dist = target_distances[j];
+        dist_bwd[edge] = dist;
+        parent_bwd[edge] = static_cast<int32_t>(edge);
+        pq_bwd.push({dist, edge});
+    }
+    
+    double best = inf;
+    uint32_t meeting_edge = std::numeric_limits<uint32_t>::max();
+    
+    // Bidirectional search
+    while (!pq_fwd.empty() || !pq_bwd.empty()) {
+        
+        // === FORWARD STEP ===
+        if (!pq_fwd.empty()) {
+            const Node curr = pq_fwd.top();
+            pq_fwd.pop();
+            
+            if (curr.distance > dist_fwd[curr.edge]) {
+                goto backward_step;
+            }
+            if (curr.distance >= best) {
+                goto backward_step;
+            }
+            
+            // Expand forward using only upward shortcuts (inside == +1)
+            const auto& adjacency = fwd_adj_[curr.edge];
+            for (uint32_t idx : adjacency) {
+                const auto& sc = shortcuts_[idx];
+                
+                // Only upward shortcuts
+                if (sc.inside != 1) {
+                    continue;
+                }
+                
+                const double candidate = curr.distance + sc.cost;
+                if (candidate < dist_fwd[sc.to]) {
+                    dist_fwd[sc.to] = candidate;
+                    parent_fwd[sc.to] = static_cast<int32_t>(curr.edge);
+                    pq_fwd.push({candidate, sc.to});
+                    
+                    // Check if backward search reached this edge
+                    if (dist_bwd[sc.to] < inf) {
+                        const double total = candidate + dist_bwd[sc.to];
+                        if (total < best) {
+                            best = total;
+                            meeting_edge = sc.to;
+                        }
+                    }
+                }
+            }
+        }
+        
+backward_step:
+        // === BACKWARD STEP ===
+        if (!pq_bwd.empty()) {
+            const Node curr = pq_bwd.top();
+            pq_bwd.pop();
+            
+            if (curr.distance > dist_bwd[curr.edge]) {
+                goto termination_check;
+            }
+            if (curr.distance >= best) {
+                goto termination_check;
+            }
+            
+            // Expand backward using downward and lateral shortcuts (inside == -1 or 0)
+            const auto& adjacency = bwd_adj_[curr.edge];
+            for (uint32_t idx : adjacency) {
+                const auto& sc = shortcuts_[idx];
+                
+                // Downward or lateral shortcuts
+                if (sc.inside != -1 && sc.inside != 0) {
+                    continue;
+                }
+                
+                const uint32_t prev = sc.from;
+                const double candidate = curr.distance + sc.cost;
+                if (candidate < dist_bwd[prev]) {
+                    dist_bwd[prev] = candidate;
+                    parent_bwd[prev] = static_cast<int32_t>(curr.edge);
+                    pq_bwd.push({candidate, prev});
+                    
+                    // Check if forward search reached this edge
+                    if (dist_fwd[prev] < inf) {
+                        const double total = dist_fwd[prev] + candidate;
+                        if (total < best) {
+                            best = total;
+                            meeting_edge = prev;
+                        }
+                    }
+                }
+            }
+        }
+        
+termination_check:
+        // Early termination if both queues exceed best distance
+        if (!pq_fwd.empty() && !pq_bwd.empty()) {
+            if (pq_fwd.top().distance + pq_bwd.top().distance >= best) {
+                break;
+            }
+        }
+    }
+    
+    // Check if we found a path
+    if (meeting_edge == std::numeric_limits<uint32_t>::max() || best >= inf) {
+        return {0.0, {}, false};
+    }
+    
+    // Reconstruct path from meeting edge
+    std::vector<uint32_t> path;
+    
+    // Backward from meeting to source
+    uint32_t curr = meeting_edge;
+    while (parent_fwd[curr] != static_cast<int32_t>(curr)) {
+        path.push_back(curr);
+        curr = static_cast<uint32_t>(parent_fwd[curr]);
+        if (curr >= edge_count) break;
+    }
+    path.push_back(curr);
+    std::reverse(path.begin(), path.end());
+    
+    // Forward from meeting to target
+    curr = meeting_edge;
+    while (parent_bwd[curr] != static_cast<int32_t>(curr)) {
+        curr = static_cast<uint32_t>(parent_bwd[curr]);
+        if (curr >= edge_count) break;
+        path.push_back(curr);
+    }
+    
+    // Find which target edge we ended at and add its length
+    // (to be consistent with single query behavior)
+    uint32_t final_target_edge = curr;
+    double target_edge_cost = 0.0;
+    const auto it_target = edge_meta_.find(final_target_edge);
+    if (it_target != edge_meta_.end()) {
+        target_edge_cost = it_target->second.length;
+    }
+    
+    return {best + target_edge_cost, path, true};
+}
+
 double ShortcutGraph::get_edge_length(uint32_t edge_id) const {
     const auto it = edge_meta_.find(edge_id);
     if (it == edge_meta_.end()) {
