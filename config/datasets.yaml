@@ -1,0 +1,14 @@
+# Dataset Configuration
+# Define available datasets with paths to shortcuts and edges files
+# Paths can be absolute or relative to the repository root
+
+datasets:
+  - name: "Somerset"
+    shortcuts_path: "../spark-shortest-path/output/Somerset_shortcuts_final"
+    edges_path: "../osm-to-road-network/data/output/Somerset_driving_simplified_edges_with_h3.csv"
+    description: "Somerset, Kentucky, USA"
+  
+  - name: "Burnaby"
+    shortcuts_path: "../spark-shortest-path/output/Burnaby_shortcuts_final"
+    edges_path: "../osm-to-road-network/data/output/Burnaby_driving_simplified_edges_with_h3.csv"
+    description: "Burnaby, British Columbia, Canada"

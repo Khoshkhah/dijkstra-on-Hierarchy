@@ -545,8 +545,8 @@ ExpandedResult ShortcutGraph::expand_shortcut_path(const std::vector<uint32_t>& 
         const auto& sc = shortcuts_[it->second];
         const uint32_t via = sc.via_edge;
         
-        if (via == 0 || via == u) {
-            // Base edge (no intermediate or via equals source)
+        if (via == 0 || via == u || via == v) {
+            // Base edge (no intermediate or via equals source/target)
             return {u, v};
         }
         
@@ -568,9 +568,16 @@ ExpandedResult ShortcutGraph::expand_shortcut_path(const std::vector<uint32_t>& 
     for (size_t i = 0; i + 1 < shortcut_path.size(); ++i) {
         std::unordered_set<uint64_t> visited;
         auto expanded = expand_pair(shortcut_path[i], shortcut_path[i + 1], visited);
-        for (uint32_t e : expanded) {
-            if (base_edges.empty() || base_edges.back() != e) {
-                base_edges.push_back(e);
+        
+        // For first pair, add all nodes
+        if (base_edges.empty()) {
+            base_edges = expanded;
+        } else {
+            // For subsequent pairs, skip the first node (already in base_edges as last node)
+            if (!expanded.empty() && !base_edges.empty() && expanded[0] == base_edges.back()) {
+                base_edges.insert(base_edges.end(), expanded.begin() + 1, expanded.end());
+            } else {
+                base_edges.insert(base_edges.end(), expanded.begin(), expanded.end());
             }
         }
     }

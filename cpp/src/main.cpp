@@ -195,23 +195,11 @@ void print_result(const std::pair<uint32_t, uint32_t>& query, const QueryResult&
     if (expanded.success && !expanded.base_edges.empty()) {
         std::cout << "  Expanded base edge path length: " << expanded.base_edges.size() << " edges\n";
         std::cout << "  Expanded path: ";
-        if (expanded.base_edges.size() <= 10) {
-            for (size_t i = 0; i < expanded.base_edges.size(); ++i) {
-                std::cout << expanded.base_edges[i];
-                if (i + 1 < expanded.base_edges.size()) {
-                    std::cout << " -> ";
-                }
-            }
-        } else {
-            for (size_t i = 0; i < 5; ++i) {
-                std::cout << expanded.base_edges[i] << " -> ";
-            }
-            std::cout << "... -> ";
-            for (size_t i = expanded.base_edges.size() - 5; i < expanded.base_edges.size(); ++i) {
-                std::cout << expanded.base_edges[i];
-                if (i + 1 < expanded.base_edges.size()) {
-                    std::cout << " -> ";
-                }
+        // Always print full path
+        for (size_t i = 0; i < expanded.base_edges.size(); ++i) {
+            std::cout << expanded.base_edges[i];
+            if (i + 1 < expanded.base_edges.size()) {
+                std::cout << " -> ";
             }
         }
         std::cout << "\n";

@@ -180,3 +180,26 @@ This project is part of a three-stage routing pipeline:
 1. **osm-to-road-network** outputs `*_edges_with_h3.csv` and `*_edge_graph.csv`
 2. **spark-shortest-path** reads these files and produces `shortcuts.parquet`
 3. **dijkstra-on-Hierarchy** loads the Parquet file for sub-millisecond queries
+
+---
+
+## Web Application
+
+An interactive web application for visualizing shortest paths is available in the [routing-pipeline](https://github.com/khoshkhah/routing-pipeline) repository. The web app provides:
+
+- **Interactive Map**: Click-based source/destination selection with Folium
+- **Multi-Dataset Support**: Switch between different regions
+- **Real-Time Routing**: Sub-second query times using this C++ engine
+- **Path Visualization**: Route overlay with road metadata
+- **REST API**: FastAPI backend for programmatic access
+
+**Quick Start:**
+```bash
+cd ../routing-pipeline
+docker-compose up --build
+# Access: http://localhost:8501
+```
+
+See the [routing-pipeline README](https://github.com/khoshkhah/routing-pipeline#-web-application) for complete setup and usage instructions.
+
+---
