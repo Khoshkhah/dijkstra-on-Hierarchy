@@ -738,16 +738,14 @@ termination_check:
         path.push_back(curr);
     }
     
-    // Find which target edge we ended at and add its length
-    // (to be consistent with single query behavior)
-    uint32_t final_target_edge = curr;
-    double target_edge_cost = 0.0;
-    const auto it_target = edge_meta_.find(final_target_edge);
-    if (it_target != edge_meta_.end()) {
-        target_edge_cost = it_target->second.length;
-    }
+    // We do NOT add target edge cost as requested (user considers it an extra lane).
+    // double target_edge_cost = 0.0;
+    // const auto it_target = edge_meta_.find(final_target_edge);
+    // if (it_target != edge_meta_.end()) {
+    //     target_edge_cost = it_target->second.length;
+    // }
     
-    return {best + target_edge_cost, path, true};
+    return {best, path, true};
 }
 
 double ShortcutGraph::get_edge_length(uint32_t edge_id) const {
