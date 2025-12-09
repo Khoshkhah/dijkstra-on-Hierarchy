@@ -143,34 +143,19 @@ public:
     double get_edge_length(uint32_t edge_id) const;
 
     /**
+     * @brief Get the H3 cell of an edge.
+     * @param edge_id Edge ID.
+     * @return H3 cell ID or 0.
+     */
+    uint64_t get_edge_cell(uint32_t edge_id) const;
+
+    /**
      * @brief Generate random source-target pairs for benchmarking.
      * @param count Number of pairs to generate.
      * @param seed RNG seed for reproducibility.
      * @return Vector of (source, target) pairs.
      */
     std::vector<std::pair<uint32_t, uint32_t>> sample_random_pairs(std::size_t count, uint32_t seed) const;
-
-private:
-    /**
-     * @brief Internal representation of a shortcut edge.
-     */
-    struct Shortcut {
-        uint32_t from;      ///< Source edge ID
-        uint32_t to;        ///< Target edge ID
-        double cost;        ///< Traversal cost
-        uint32_t via_edge;  ///< Intermediate edge for expansion (0 if direct)
-        uint64_t cell;      ///< H3 cell bounding this shortcut
-        int8_t inside;      ///< Direction: +1 upward, 0 lateral, -1 downward
-    };
-
-    /**
-     * @brief Metadata for a road network edge.
-     */
-    struct EdgeMeta {
-        uint64_t incoming_cell = 0;  ///< H3 cell of the edge
-        int lca_res = -1;            ///< Precomputed LCA resolution
-        double length = 0.0;         ///< Edge length/cost
-    };
 
     /**
      * @brief Highest common ancestor cell for a query.
@@ -187,8 +172,52 @@ private:
         HighCell high_cell;  ///< Highest common ancestor constraint
     };
 
+    /**
+     * @brief Debug information for a shortcut path segment.
+     */
+    struct PathDebugInfo {
+        uint32_t from;
+        uint32_t to;
+        uint64_t cell;
+        int res;
+    };
+
     HighCell compute_high_cell(uint32_t source_edge, uint32_t target_edge) const;
     QueryResult run_bidirectional(uint32_t source_edge, uint32_t target_edge, const QueryContext& ctx) const;
+    std::vector<PathDebugInfo> get_path_debug_info(const std::vector<uint32_t>& path) const;
+
+    /**
+     * @brief Metadata for a road network edge.
+     */
+    struct EdgeMeta {
+        uint64_t incoming_cell = 0;  ///< Source node H3 cell
+        uint64_t outgoing_cell = 0;  ///< Target node H3 cell
+        int lca_res = -1;            ///< Precomputed LCA resolution
+        double length = 0.0;         ///< Edge length (meters)
+        double cost = 0.0;           ///< Edge cost (e.g. seconds)
+    };
+
+    /**
+     * @brief Get full metadata for an edge.
+     * @param edge_id Edge ID.
+     * @return EdgeMeta or empty struct.
+     */
+    EdgeMeta get_edge_meta(uint32_t edge_id) const;
+
+private:
+    /**
+     * @brief Internal representation of a shortcut edge.
+     */
+    struct Shortcut {
+        uint32_t from;      ///< Source edge ID
+        uint32_t to;        ///< Target edge ID
+        double cost;        ///< Traversal cost
+        uint32_t via_edge;  ///< Intermediate edge for expansion (0 if direct)
+        uint64_t cell;      ///< H3 cell bounding this shortcut
+        int8_t inside;      ///< Direction: +1 upward, 0 lateral, -1 downward
+    };
+
+
 
     static bool parent_check(uint64_t child_cell, uint64_t parent_cell, int parent_res);
 

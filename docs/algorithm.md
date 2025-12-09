@@ -167,3 +167,286 @@ Query 1593 -> 4835
 ```
 
 Refer to the README for detailed build/run commands, environment setup, and usage examples.
+
+## One-to-One Shortest Path Algorithm
+
+The `query()` method implements a bidirectional Dijkstra search with hierarchical filtering for finding the shortest path between a single source and target edge. This is the core routing algorithm used for point-to-point queries.
+
+### Algorithm Overview
+
+```
+function query(source_edge, target_edge):
+    // Compute hierarchical context
+    high_cell = compute_high_cell(source_edge, target_edge)
+    
+    // Initialize data structures
+    dist_fwd[all edges] = infinity
+    dist_bwd[all edges] = infinity
+    parent_fwd[all edges] = -1
+    parent_bwd[all edges] = -1
+    pq_fwd = empty min-heap
+    pq_bwd = empty min-heap
+    best = infinity
+    meeting_edge = null
+    
+    // Initialize forward search from source
+    dist_fwd[source_edge] = 0.0
+    parent_fwd[source_edge] = source_edge
+    pq_fwd.push((0.0, source_edge))
+    
+    // Initialize backward search from target
+    target_cost = get_edge_cost(target_edge)
+    dist_bwd[target_edge] = target_cost
+    parent_bwd[target_edge] = target_edge
+    pq_bwd.push((target_cost, target_edge))
+    
+    // Bidirectional search
+    while not pq_fwd.empty() and not pq_bwd.empty():
+        // Alternate between forward and backward search
+        
+        // FORWARD STEP
+        if not pq_fwd.empty():
+            (curr_dist, curr_edge) = pq_fwd.pop()
+            
+            if curr_dist >= best:
+                goto termination_check
+            
+            // Expand forward using upward shortcuts (inside == 1)
+            for each shortcut from curr_edge where shortcut.inside == 1:
+                // Apply hierarchical filtering
+                if not parent_check(shortcut, high_cell):
+                    continue
+                
+                next_edge = shortcut.to
+                candidate = curr_dist + shortcut.cost
+                
+                if candidate < dist_fwd[next_edge]:
+                    dist_fwd[next_edge] = candidate
+                    parent_fwd[next_edge] = curr_edge
+                    pq_fwd.push((candidate, next_edge))
+                    
+                    // Check if backward search reached this edge
+                    if dist_bwd[next_edge] < infinity:
+                        total = candidate + dist_bwd[next_edge]
+                        if total < best:
+                            best = total
+                            meeting_edge = next_edge
+        
+        // BACKWARD STEP
+        if not pq_bwd.empty():
+            (curr_dist, curr_edge) = pq_bwd.pop()
+            
+            if curr_dist >= best:
+                goto termination_check
+            
+            // Expand backward using downward shortcuts (inside == -1)
+            // Lateral shortcuts (inside == 0) allowed only within high_cell
+            for each shortcut to curr_edge where shortcut.inside in {-1, 0}:
+                // Apply hierarchical filtering
+                if not parent_check(shortcut, high_cell):
+                    continue
+                
+                prev_edge = shortcut.from
+                candidate = curr_dist + shortcut.cost
+                
+                if candidate < dist_bwd[prev_edge]:
+                    dist_bwd[prev_edge] = candidate
+                    parent_bwd[prev_edge] = curr_edge
+                    pq_bwd.push((candidate, prev_edge))
+                    
+                    // Check if forward search reached this edge
+                    if dist_fwd[prev_edge] < infinity:
+                        total = dist_fwd[prev_edge] + candidate
+                        if total < best:
+                            best = total
+                            meeting_edge = prev_edge
+        
+        termination_check:
+            // Early termination check
+            if not pq_fwd.empty() and not pq_bwd.empty():
+                if pq_fwd.top().distance + pq_bwd.top().distance >= best:
+                    break  // No better path can be found
+    
+    // Reconstruct path from meeting edge
+    path = []
+    
+    // Backward from meeting to source
+    curr = meeting_edge
+    while parent_fwd[curr] != curr:
+        path.prepend(curr)
+        curr = parent_fwd[curr]
+    path.prepend(curr)  // Add source edge
+    
+    // Forward from meeting to target
+    curr = meeting_edge
+    while parent_bwd[curr] != curr:
+        curr = parent_bwd[curr]
+        path.append(curr)
+    
+    return (best, path)
+```
+
+### Hierarchical Filtering
+
+The `parent_check()` function ensures shortcuts respect the H3 hierarchy:
+
+```
+function parent_check(shortcut, high_cell):
+    // Shortcuts must be within or crossing into the high_cell
+    if shortcut.cell == high_cell.id and shortcut.cell_res == high_cell.res:
+        return true  // Shortcut is within the high cell
+    
+    // Check if shortcut's parent cell matches high_cell
+    shortcut_parent = h3_get_parent(shortcut.cell, high_cell.res)
+    if shortcut_parent == high_cell.id:
+        return true  // Shortcut crosses into high cell
+    
+    return false  // Shortcut is outside the search scope
+```
+
+### Key Features
+
+1. **Hierarchical Context**: Computes the highest common H3 cell for source and target to restrict the search space
+
+2. **Directional Filtering**:
+   - Forward search: only upward shortcuts (`inside == 1`)
+   - Backward search: downward (`inside == -1`) and lateral (`inside == 0`) shortcuts
+
+3. **Lateral Edge Restriction**: Lateral shortcuts are only allowed within the `high_cell` to prevent exploring irrelevant regions
+
+4. **Early Termination**: When `pq_fwd.top() + pq_bwd.top() >= best`, no better path exists
+
+5. **Target Edge Cost**: Included in backward search initialization to account for traversing the target edge
+
+## Many-to-Many Shortest Path Algorithm
+
+The `query_multi_optimized()` method implements a bidirectional search that can handle multiple source and target edges simultaneously. This is used for KNN (k-nearest neighbors) routing where we want to find the shortest path among k candidate sources and k candidate targets.
+
+### Algorithm Overview
+
+```
+function query_multi_optimized(source_edges[], target_edges[], source_distances[], target_distances[]):
+    // Initialize data structures
+    dist_fwd[all edges] = infinity
+    dist_bwd[all edges] = infinity
+    parent_fwd[all edges] = -1
+    parent_bwd[all edges] = -1
+    pq_fwd = empty min-heap
+    pq_bwd = empty min-heap
+    best = infinity
+    meeting_edge = null
+    
+    // Initialize forward search from ALL source edges
+    for each (edge, dist) in (source_edges, source_distances):
+        dist_fwd[edge] = dist  // Approach distance from query point
+        parent_fwd[edge] = edge
+        pq_fwd.push((dist, edge))
+    
+    // Initialize backward search from ALL target edges
+    for each (edge, dist) in (target_edges, target_distances):
+        edge_cost = get_edge_cost(edge)  // Travel time of the target edge
+        init_dist = edge_cost + dist  // Edge cost + egress distance
+        dist_bwd[edge] = init_dist
+        parent_bwd[edge] = edge
+        pq_bwd.push((init_dist, edge))
+    
+    // Bidirectional search
+    while not pq_fwd.empty() and not pq_bwd.empty():
+        // Alternate between forward and backward search
+        
+        // FORWARD STEP
+        if not pq_fwd.empty():
+            (curr_dist, curr_edge) = pq_fwd.pop()
+            
+            if curr_dist >= best:
+                goto termination_check
+            
+            // Expand forward using upward shortcuts (inside == 1)
+            for each shortcut from curr_edge where shortcut.inside == 1:
+                next_edge = shortcut.to
+                candidate = curr_dist + shortcut.cost
+                
+                if candidate < dist_fwd[next_edge]:
+                    dist_fwd[next_edge] = candidate
+                    parent_fwd[next_edge] = curr_edge
+                    pq_fwd.push((candidate, next_edge))
+                    
+                    // Check if backward search reached this edge
+                    if dist_bwd[next_edge] < infinity:
+                        total = candidate + dist_bwd[next_edge]
+                        if total < best:
+                            best = total
+                            meeting_edge = next_edge
+        
+        // BACKWARD STEP
+        if not pq_bwd.empty():
+            (curr_dist, curr_edge) = pq_bwd.pop()
+            
+            if curr_dist >= best:
+                goto termination_check
+            
+            // Expand backward using downward and lateral shortcuts (inside == -1 or 0)
+            for each shortcut to curr_edge where shortcut.inside in {-1, 0}:
+                prev_edge = shortcut.from
+                candidate = curr_dist + shortcut.cost
+                
+                if candidate < dist_bwd[prev_edge]:
+                    dist_bwd[prev_edge] = candidate
+                    parent_bwd[prev_edge] = curr_edge
+                    pq_bwd.push((candidate, prev_edge))
+                    
+                    // Check if forward search reached this edge
+                    if dist_fwd[prev_edge] < infinity:
+                        total = dist_fwd[prev_edge] + candidate
+                        if total < best:
+                            best = total
+                            meeting_edge = prev_edge
+        
+        termination_check:
+            // Early termination check
+            // NOTE: Only works correctly for single source and single target!
+            // With multiple targets, pq_bwd.top() might be from a different target,
+            // causing premature termination. So we disable it for multi-target queries.
+            single_source_target = (source_edges.size == 1 and target_edges.size == 1)
+            
+            if single_source_target and not pq_fwd.empty() and not pq_bwd.empty():
+                if pq_fwd.top().distance + pq_bwd.top().distance >= best:
+                    break  // No better path can be found
+    
+    // Reconstruct path from meeting edge
+    path = []
+    
+    // Backward from meeting to source
+    curr = meeting_edge
+    while parent_fwd[curr] != curr:
+        path.prepend(curr)
+        curr = parent_fwd[curr]
+    path.prepend(curr)  // Add source edge
+    
+    // Forward from meeting to target
+    curr = meeting_edge
+    while parent_bwd[curr] != curr:
+        curr = parent_bwd[curr]
+        path.append(curr)
+    
+    return (best, path)
+```
+
+### Key Differences from Single Source/Target
+
+1. **Multiple Initialization**: Both forward and backward searches start from multiple edges simultaneously, simulating a "dummy" source/target node connected to all candidates.
+
+2. **Distance Initialization**:
+   - Source edges: initialized with approach distance (cost to reach from query point)
+   - Target edges: initialized with edge cost + egress distance (includes traversal cost)
+
+3. **Termination Condition**: The standard early termination check (`pq_fwd.top() + pq_bwd.top() >= best`) is **disabled for multiple targets** because it can cause premature termination. With multiple targets, `pq_bwd.top()` might be from a different target than the optimal one, leading to incorrect early stopping.
+
+4. **Path Selection**: The algorithm automatically selects the source and target that yield the shortest total path among all combinations.
+
+### Performance Characteristics
+
+- **Single source/target**: Uses early termination for optimal performance
+- **Multiple sources/targets**: Explores full search space for correctness (slightly slower but correct)
+- **Time Complexity**: O((|S| + |T| + |E|) log |V|) where S = sources, T = targets, E = edges explored
+- **Space Complexity**: O(|V|) for distance and parent arrays

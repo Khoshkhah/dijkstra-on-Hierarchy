@@ -36,3 +36,15 @@ uint64_t h3_find_lca(uint64_t cell_a, uint64_t cell_b);
  * @return Resolution (0-15), or -1 if the cell is invalid.
  */
 int h3_resolution(uint64_t cell);
+
+/**
+ * @brief Get the boundary coordinates of an H3 cell.
+ * @param cell The H3 cell index.
+ * @return Vector of {lat, lon} pairs (degrees).
+ */
+#include <vector>
+#include <utility>
+std::vector<std::pair<double, double>> h3_cell_boundary(uint64_t cell);
+
+// Returns cell ID for lat/lon at resolution
+uint64_t h3_lat_lng_to_cell(double lat, double lon, int res);

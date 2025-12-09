@@ -84,3 +84,35 @@ int h3_resolution(uint64_t cell) {
     }
     return getResolution(cell);
 }
+
+std::vector<std::pair<double, double>> h3_cell_boundary(uint64_t cell) {
+    if (cell == 0) return {};
+    
+    CellBoundary boundary;
+    cellToBoundary(cell, &boundary);
+    
+    std::vector<std::pair<double, double>> coords;
+    coords.reserve(boundary.numVerts);
+    for (int i = 0; i < boundary.numVerts; ++i) {
+        // H3 returns rads, convert to degrees
+        double lat = radsToDegs(boundary.verts[i].lat);
+        double lon = radsToDegs(boundary.verts[i].lng);
+        coords.push_back({lat, lon});
+    }
+    return coords;
+}
+
+uint64_t h3_lat_lng_to_cell(double lat, double lon, int res) {
+    if (res < 0 || res > 15) return 0;
+    
+    LatLng location;
+    location.lat = degsToRads(lat);
+    location.lng = degsToRads(lon);
+    
+    H3Index cell;
+    H3Error err = latLngToCell(&location, res, &cell);
+    if (err != E_SUCCESS) {
+        return 0;
+    }
+    return cell;
+}

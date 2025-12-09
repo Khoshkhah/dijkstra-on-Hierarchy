@@ -28,8 +28,10 @@
 #include <algorithm>
 #include <cstddef>
 #include <filesystem>
+#include <cmath>
 #include <fstream>
-#include <functional>
+#include <iomanip>
+#include <iostream>
 #include <limits>
 #include <queue>
 #include <random>
@@ -140,8 +142,10 @@ ColumnIndices resolve_columns(const std::shared_ptr<arrow::Schema>& schema) {
 struct CsvColumns {
     int id = -1;
     int incoming_cell = -1;
+    int outgoing_cell = -1;
     int lca_res = -1;
     int length = -1;
+    int cost = -1;
 };
 
 CsvColumns resolve_csv_columns(const std::vector<std::string>& headers) {
@@ -152,10 +156,14 @@ CsvColumns resolve_csv_columns(const std::vector<std::string>& headers) {
             cols.id = static_cast<int>(i);
         } else if (header == "incoming_cell") {
             cols.incoming_cell = static_cast<int>(i);
+        } else if (header == "outgoing_cell") {
+            cols.outgoing_cell = static_cast<int>(i);
         } else if (header == "lca_res") {
             cols.lca_res = static_cast<int>(i);
         } else if (header == "length") {
             cols.length = static_cast<int>(i);
+        } else if (header == "cost") {
+            cols.cost = static_cast<int>(i);
         }
     }
     if (cols.id < 0) {
@@ -240,7 +248,8 @@ void ShortcutGraph::load_shortcuts(const std::string& parquet_path) {
                 Shortcut sc{};
                 sc.from = get_value<uint32_t>(incoming, i);
                 sc.to = get_value<uint32_t>(outgoing, i);
-                sc.cost = get_value<double>(cost, i);
+                // Convert raw cost (m / km/h) to seconds: * 3.6
+                sc.cost = get_value<double>(cost, i) * 3.6;
                 sc.via_edge = via ? get_value<uint32_t>(via, i) : 0U;
                 sc.cell = cell ? get_value<uint64_t>(cell, i) : 0ULL;
                 sc.inside = static_cast<int8_t>(get_value<int32_t>(inside, i));
@@ -295,11 +304,28 @@ void ShortcutGraph::load_edge_metadata(const std::string& csv_path) {
         }
         const uint32_t id = static_cast<uint32_t>(std::stoul(parts[cols.id]));
         EdgeMeta meta;
-        meta.incoming_cell = static_cast<uint64_t>(std::stoull(parts[cols.incoming_cell]));
-        meta.lca_res = std::stoi(parts[cols.lca_res]);
+        if (cols.incoming_cell >= 0 && cols.incoming_cell < parts.size()) {
+            try {
+                meta.incoming_cell = std::stoull(parts[cols.incoming_cell]);
+            } catch (...) { meta.incoming_cell = 0; }
+        }
+        if (cols.outgoing_cell >= 0 && cols.outgoing_cell < parts.size()) {
+            try {
+                meta.outgoing_cell = std::stoull(parts[cols.outgoing_cell]);
+            } catch (...) { meta.outgoing_cell = 0; }
+        }
+        if (cols.lca_res >= 0 && cols.lca_res < parts.size()) {
+            try {
+                meta.lca_res = std::stoi(parts[cols.lca_res]);
+            } catch (...) { meta.lca_res = 0; }
+        }
         // Load edge length if available
         if (cols.length >= 0 && static_cast<int>(parts.size()) > cols.length && !parts[cols.length].empty()) {
             meta.length = std::stod(parts[cols.length]);
+        }
+        // Load edge cost if available
+        if (cols.cost >= 0 && static_cast<int>(parts.size()) > cols.cost && !parts[cols.cost].empty()) {
+            meta.cost = std::stod(parts[cols.cost]);
         }
         edge_meta_[id] = meta;
     }
@@ -325,7 +351,7 @@ bool ShortcutGraph::parent_check(uint64_t child_cell, uint64_t parent_cell, int 
         return true;
     }
     if (child_cell == 0) {
-        return false;
+        return true; // Relaxed: Allow base edges/lateral shortcuts without valid cells
     }
     const int child_res = h3_resolution(child_cell);
     if (parent_res > child_res) {
@@ -347,8 +373,34 @@ QueryResult ShortcutGraph::run_bidirectional(uint32_t source_edge, uint32_t targ
     if (source_edge >= edge_count || target_edge >= edge_count) {
         return {-1.0, {}, false};
     }
+    // [UPDATED] Optimization 1: Source == Target
+    // Return the edge's cost instead of 0.0
     if (source_edge == target_edge) {
-        return {0.0, {source_edge}, true};
+        double cost = 0.0;
+        const auto it = edge_meta_.find(source_edge);
+        if (it != edge_meta_.end()) {
+            cost = it->second.cost > 0.0 ? it->second.cost : it->second.length;
+        }
+        return {cost, {source_edge}, true};
+    }
+
+    // [UPDATED] Optimization 2: Direct Shortcut Check
+    // If a direct shortcut exists from source to target, return it immediately.
+    // This avoids the overhead of priority queue logic for simple cases.
+    double target_cost = 0.0;
+    const auto it_target = edge_meta_.find(target_edge);
+    if (it_target != edge_meta_.end()) {
+        target_cost = it_target->second.cost > 0.0 ? it_target->second.cost : it_target->second.length;
+    }
+
+    const auto& adjacency = fwd_adj_[source_edge];
+    for (uint32_t idx : adjacency) {
+        const auto& sc = shortcuts_[idx];
+        if (sc.to == target_edge) {
+            // Found direct shortcut!
+            // Cost = Shortcut path cost (source -> target entry) + Target edge cost
+            return {sc.cost + target_cost, {source_edge, target_edge}, true};
+        }
     }
 
     const double inf = std::numeric_limits<double>::infinity();
@@ -365,12 +417,16 @@ QueryResult ShortcutGraph::run_bidirectional(uint32_t source_edge, uint32_t targ
     std::priority_queue<Node, std::vector<Node>, decltype(cmp)> pq_fwd(cmp);
     std::priority_queue<Node, std::vector<Node>, decltype(cmp)> pq_bwd(cmp);
 
+    // Initialize Priority Queues
     dist_fwd[source_edge] = 0.0;
-    dist_bwd[target_edge] = 0.0;
+    
+    // target_cost and it_target already computed in Optimization 2
+    
+    dist_bwd[target_edge] = target_cost;
     parent_fwd[source_edge] = static_cast<int32_t>(source_edge);
     parent_bwd[target_edge] = static_cast<int32_t>(target_edge);
     pq_fwd.push({0.0, source_edge});
-    pq_bwd.push({0.0, target_edge});
+    pq_bwd.push({target_cost, target_edge});
 
     double best = inf;
     uint32_t meeting_edge = std::numeric_limits<uint32_t>::max();
@@ -390,9 +446,12 @@ QueryResult ShortcutGraph::run_bidirectional(uint32_t source_edge, uint32_t targ
             const auto& adjacency = fwd_adj_[curr.edge];
             for (uint32_t idx : adjacency) {
                 const auto& sc = shortcuts_[idx];
+                
+                // Forward: only upward shortcuts (inside == 1)
                 if (sc.inside != 1) {
                     continue;
                 }
+                
                 if (!parent_check(sc.cell, high.cell, high.res)) {
                     continue;
                 }
@@ -424,10 +483,14 @@ QueryResult ShortcutGraph::run_bidirectional(uint32_t source_edge, uint32_t targ
             const auto& adjacency = bwd_adj_[curr.edge];
             for (uint32_t idx : adjacency) {
                 const auto& sc = shortcuts_[idx];
-                const bool allow_lateral_at_high = ( sc.inside == 0 && sc.cell == high.cell);
+                
+                // Backward: downward (inside == -1) + lateral (inside == 0) in high_cell only
+                // Relaxed: Also allow lateral edges with cell 0 (base edges)
+                const bool allow_lateral_at_high = (sc.inside == 0 && (sc.cell == high.cell || sc.cell == 0));
                 if (sc.inside != -1 && !allow_lateral_at_high) {
                     continue;
                 }
+                
                 if (!parent_check(sc.cell, high.cell, high.res)) {
                    continue;
                 }
@@ -493,14 +556,9 @@ QueryResult ShortcutGraph::run_bidirectional(uint32_t source_edge, uint32_t targ
     std::vector<uint32_t> path = forward_path;
     path.insert(path.end(), backward_path.begin(), backward_path.end());
     
-    // Add target edge cost to the total distance
-    const auto it_target = edge_meta_.find(target_edge);
-    double target_cost = 0.0;
-    if (it_target != edge_meta_.end()) {
-        target_cost = it_target->second.length;
-    }
+    // [UPDATED] Target edge cost is now handled at initialization of backward search
     
-    return {best + target_cost, path, true};
+    return {best, path, true};
 }
 
 QueryResult ShortcutGraph::query(uint32_t source_edge, uint32_t target_edge) const {
@@ -584,7 +642,6 @@ QueryResult ShortcutGraph::query_multi_optimized(
     std::vector<int32_t> parent_fwd(edge_count, -1);
     std::vector<int32_t> parent_bwd(edge_count, -1);
     
-    // Priority queues for bidirectional search
     struct Node {
         double distance;
         uint32_t edge;
@@ -593,32 +650,43 @@ QueryResult ShortcutGraph::query_multi_optimized(
     std::priority_queue<Node, std::vector<Node>, decltype(cmp)> pq_fwd(cmp);
     std::priority_queue<Node, std::vector<Node>, decltype(cmp)> pq_bwd(cmp);
     
-    // Initialize all source edges
+    // Initialize all source edges (simulating dummy source node)
+    // Source edges are initialized with their approach distance
     for (size_t i = 0; i < source_edges.size(); ++i) {
         uint32_t edge = source_edges[i];
         if (edge >= edge_count) continue;
         
-        double dist = source_distances[i];
+        double dist = source_distances[i];  // Approach distance
         dist_fwd[edge] = dist;
         parent_fwd[edge] = static_cast<int32_t>(edge);
         pq_fwd.push({dist, edge});
     }
     
-    // Initialize all target edges
+    // Initialize all target edges (simulating dummy target node)
     for (size_t j = 0; j < target_edges.size(); ++j) {
         uint32_t edge = target_edges[j];
         if (edge >= edge_count) continue;
         
-        double dist = target_distances[j];
-        dist_bwd[edge] = dist;
+        // Initialize with edge cost + egress distance
+        double edge_cost = 0.0;
+        const auto it_target = edge_meta_.find(edge);
+        if (it_target != edge_meta_.end()) {
+             edge_cost = it_target->second.cost > 0.0 ? it_target->second.cost : it_target->second.length;
+        }
+        
+        double init_dist = edge_cost + target_distances[j];  // Edge cost + egress distance
+        
+        dist_bwd[edge] = init_dist;
         parent_bwd[edge] = static_cast<int32_t>(edge);
-        pq_bwd.push({dist, edge});
+        pq_bwd.push({init_dist, edge});
+        
+
     }
     
     double best = inf;
     uint32_t meeting_edge = std::numeric_limits<uint32_t>::max();
     
-    // Bidirectional search
+    // Bidirectional search with simple directional filtering (no high_cell)
     while (!pq_fwd.empty() || !pq_bwd.empty()) {
         
         // === FORWARD STEP ===
@@ -633,7 +701,7 @@ QueryResult ShortcutGraph::query_multi_optimized(
                 goto backward_step;
             }
             
-            // Expand forward using only upward shortcuts (inside == +1)
+            // Expand forward using only upward shortcuts (inside == 1)
             const auto& adjacency = fwd_adj_[curr.edge];
             for (uint32_t idx : adjacency) {
                 const auto& sc = shortcuts_[idx];
@@ -704,11 +772,15 @@ backward_step:
         }
         
 termination_check:
-        // Early termination if both queues exceed best distance
-        if (!pq_fwd.empty() && !pq_bwd.empty()) {
-            if (pq_fwd.top().distance + pq_bwd.top().distance >= best) {
-                break;
-            }
+        // Termination check: continue only if either queue can potentially improve best
+        // Forward can improve if pq_fwd is not empty and pq_fwd.top().distance < best
+        // Backward can improve if pq_bwd is not empty and pq_bwd.top().distance < best
+        bool forward_can_improve = !pq_fwd.empty() && pq_fwd.top().distance < best;
+        bool backward_can_improve = !pq_bwd.empty() && pq_bwd.top().distance < best;
+        
+        // Terminate when neither can improve
+        if (!forward_can_improve && !backward_can_improve) {
+            break;
         }
     }
     
@@ -738,14 +810,20 @@ termination_check:
         path.push_back(curr);
     }
     
-    // We do NOT add target edge cost as requested (user considers it an extra lane).
-    // double target_edge_cost = 0.0;
-    // const auto it_target = edge_meta_.find(final_target_edge);
-    // if (it_target != edge_meta_.end()) {
-    //     target_edge_cost = it_target->second.length;
-    // }
+    std::cout << "[DEBUG] Reconstructed path: source=" << path.front() << " target=" << path.back() 
+             << " meeting=" << meeting_edge << " best=" << best << std::endl;
+    
+
     
     return {best, path, true};
+}
+
+ShortcutGraph::EdgeMeta ShortcutGraph::get_edge_meta(uint32_t edge_id) const {
+    const auto it = edge_meta_.find(edge_id);
+    if (it == edge_meta_.end()) {
+        return EdgeMeta{};
+    }
+    return it->second;
 }
 
 double ShortcutGraph::get_edge_length(uint32_t edge_id) const {
@@ -853,4 +931,39 @@ ShortcutGraph::sample_random_pairs(std::size_t count, uint32_t seed) const {
         pairs.emplace_back(source, target);
     }
     return pairs;
+}
+
+std::vector<ShortcutGraph::PathDebugInfo> ShortcutGraph::get_path_debug_info(const std::vector<uint32_t>& path) const {
+    std::vector<PathDebugInfo> info;
+    if (path.size() < 2) {
+        return info;
+    }
+    
+    info.reserve(path.size() - 1);
+    for (size_t i = 0; i + 1 < path.size(); ++i) {
+        uint32_t u = path[i];
+        uint32_t v = path[i + 1];
+        const uint64_t key = (static_cast<uint64_t>(u) << 32) | v;
+        
+        auto it = shortcut_lookup_.find(key);
+        if (it != shortcut_lookup_.end()) {
+            const auto& sc = shortcuts_[it->second];
+            int res = h3_resolution(sc.cell);
+            info.push_back({u, v, sc.cell, res});
+        } else {
+             // For base edges (not shortcuts), we might not have a cell
+             // or lookup failed. Push placeholders or try to find via logic if needed.
+             // Usually, path contains shortcuts, if it's base edge it effectively has "direct" connection.
+             info.push_back({u, v, 0, -1});
+        }
+    }
+    return info;
+}
+
+uint64_t ShortcutGraph::get_edge_cell(uint32_t edge_id) const {
+    const auto it = edge_meta_.find(edge_id);
+    if (it == edge_meta_.end()) {
+        return 0;
+    }
+    return it->second.incoming_cell;
 }
